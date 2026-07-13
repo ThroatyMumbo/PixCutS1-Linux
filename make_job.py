@@ -2,15 +2,18 @@
 """End-to-end PixCut S1 job builder: artwork PNG -> (print JPEG + cut HPGL) ->
 combo-job stream.
 
-Simple case (this script): the input PNG is ALREADY at print resolution
-(1200x2100 = 4x7" @ 300dpi). Transparent background (zero alpha) marks "no ink"
-for the printer and "outside the sticker" for the cutter, exactly as the vendor
-expects.
+The input PNG is normalized to print resolution (1200x2100 = 4x7" @ 300dpi): if it
+is already that size it passes through unchanged (assumed already laid out in the
+usable area); otherwise it is scaled to fit (aspect preserved, centered) within the
+reachable usable area (5.1mm bleed top/left/right, 0 bottom) -- or the whole sheet
+with --full-media -- leaving a transparent margin so the outward cut stays on the
+sheet. Transparent background (zero alpha) marks "no ink" for the printer and
+"outside the sticker" for the cutter, exactly as the vendor expects.
 
   print raster = PNG composited onto WHITE, saved baseline JPEG, 4:4:4, q90
                  (matches the vendor's encoder: SOF0, samp 1x1, ~q90, no DRI).
   cut vector   = generate_cut.py's validated U/D path (alpha silhouette offset
-                 outward by the cut border, rounded joins, overcut tabs).
+                 outward by the cut border, round/miter/bevel joins, overcut tabs).
 
 DRY RUN (default) touches no hardware and writes three files:
   <out>_print.jpg      the EXACT bytes we'd stream to the printer
@@ -25,13 +28,15 @@ DRY RUN (default) touches no hardware and writes three files:
 --send builds the combo-job and streams it over USB (interface 2, EP 0x06/0x86),
 reusing the proven replay path. THIS MOVES THE MACHINE AND CONSUMES A SHEET.
 """
-import sys, os, re, json, time, struct, argparse, subprocess
+import sys, os, re, json, time, struct, argparse, subprocess, tempfile
 import numpy as np
 from PIL import Image, ImageDraw
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PPM  = 300.0 / 25.4                       # px per mm (media raster is 300 dpi)
 MEDIA_W, MEDIA_H = 1200, 2100             # 4x7" @ 300dpi -- the print raster size
+BLEED_MM = 5.1                            # reachable/usable-area inset: top/left/right
+                                          # have 5.1mm bleed, bottom is 0 (the media edge)
 JPEG_QUALITY = 90                         # backed out of the vendor's quant table
 
 # combo-job constants (decoded from real captures)
@@ -51,14 +56,38 @@ BIAS_X_MM, BIAS_Y_MM = 0.0, 0.0
 VID, PID, IFACE, EP_OUT, EP_IN = 0x302C, 0x3101, 2, 0x06, 0x86
 
 
-def build_print_jpeg(png_path):
-    """PNG -> exact print-raster JPEG bytes (composited on white, vendor format)."""
-    im = Image.open(png_path).convert("RGBA")
-    if im.size != (MEDIA_W, MEDIA_H):
-        sys.exit(f"expected a {MEDIA_W}x{MEDIA_H} image (300dpi 4x7\"), got {im.size}. "
-                 "This simple path does no scaling/positioning yet.")
-    bg = Image.new("RGB", im.size, (255, 255, 255))     # transparent -> white (no ink)
-    bg.paste(im, mask=im.split()[3])
+def fit_to_media(im_rgba, border_mm, full_media=False):
+    """Normalize artwork to the 1200x2100 @300dpi RGBA media canvas.
+
+    Exact-size input passes through unchanged: it's assumed to already be laid out in
+    the usable area (the validated full-bleed path). Otherwise scale-to-fit preserving
+    aspect ratio, centered into a placement box that leaves a transparent margin >= the
+    cut border (+1mm safety) so the OUTWARD-offset cut still lands on the sheet. By
+    default the box is the reachable USABLE area (5.1mm bleed top/left/right, 0 bottom);
+    full_media=True places on the whole sheet instead. Both the print raster and the
+    cut vector derive from this canvas, so they stay 1:1 concentric."""
+    if im_rgba.size == (MEDIA_W, MEDIA_H):
+        return im_rgba, False
+    m = int(round((border_mm + 1.0) * PPM))               # keep the outward cut on-sheet
+    if full_media:
+        x0, y0, x1, y1 = m, m, MEDIA_W - m, MEDIA_H - m
+    else:
+        b = int(round(BLEED_MM * PPM))                    # usable inset; bottom edge = media edge (0)
+        x0, y0, x1, y1 = b + m, b + m, MEDIA_W - b - m, MEDIA_H - m
+    box_w, box_h = x1 - x0, y1 - y0
+    scale = min(box_w / im_rgba.width, box_h / im_rgba.height)
+    new_w, new_h = max(1, round(im_rgba.width*scale)), max(1, round(im_rgba.height*scale))
+    art = im_rgba.resize((new_w, new_h), Image.LANCZOS)
+    canvas = Image.new("RGBA", (MEDIA_W, MEDIA_H), (0, 0, 0, 0))  # transparent = no ink / outside sticker
+    canvas.paste(art, (x0 + (box_w - new_w)//2, y0 + (box_h - new_h)//2))
+    return canvas, True
+
+
+def build_print_jpeg(im_rgba):
+    """Normalized 1200x2100 RGBA -> exact print-raster JPEG bytes (composited on
+    white, vendor format)."""
+    bg = Image.new("RGB", im_rgba.size, (255, 255, 255))     # transparent -> white (no ink)
+    bg.paste(im_rgba, mask=im_rgba.split()[3])
     import io
     buf = io.BytesIO()
     # baseline (no progression), 4:4:4 (subsampling=0), no restart markers -> matches vendor
@@ -66,10 +95,10 @@ def build_print_jpeg(png_path):
     return buf.getvalue(), bg
 
 
-def build_cut_hpgl(png_path, border_mm, bias_x, bias_y, out_hpgl):
+def build_cut_hpgl(png_path, border_mm, bias_x, bias_y, join, out_hpgl):
     """Delegate to the validated generator; return the HPGL text."""
     r = subprocess.run([sys.executable, os.path.join(HERE, "generate_cut.py"),
-                        png_path, out_hpgl, str(border_mm), str(bias_x), str(bias_y)],
+                        png_path, out_hpgl, str(border_mm), str(bias_x), str(bias_y), join],
                        capture_output=True, text=True)
     if r.returncode != 0:
         sys.exit(f"generate_cut.py failed:\n{r.stderr}")
@@ -175,9 +204,15 @@ def send_job(jpeg, hpgl_bytes):
 
 def main():
     ap = argparse.ArgumentParser(description="PixCut E2E job builder (dry-run by default).")
-    ap.add_argument("png", help="artwork, transparent bg, 1200x2100 @ 300dpi")
+    ap.add_argument("png", help="artwork, transparent bg (1200x2100 @300dpi used as-is; "
+                                 "any other size is scaled to fit)")
     ap.add_argument("out_prefix", nargs="?", help="output prefix (default: PNG name)")
     ap.add_argument("--border", type=float, default=1.25, help="cut border mm (default 1.25)")
+    ap.add_argument("--join", choices=["round", "miter", "bevel"], default="round",
+                    help="offset corner style: round (vendor default) | miter | bevel")
+    ap.add_argument("--full-media", action="store_true",
+                    help="when scaling, fit the whole sheet instead of the usable area "
+                         "(5.1mm bleed top/left/right); ignored for exact-size input")
     ap.add_argument("--bias-x", type=float, default=BIAS_X_MM,
                     help=f"mechanical cross(X) registration bias mm (default {BIAS_X_MM})")
     ap.add_argument("--bias-y", type=float, default=BIAS_Y_MM,
@@ -192,12 +227,30 @@ def main():
     prev_path = f"{prefix}_preview.png"
 
     print(f"[1/2] print raster  {args.png} -> {jpg_path}")
-    jpeg, base_rgb = build_print_jpeg(args.png)
+    art = Image.open(args.png).convert("RGBA")
+    norm, scaled = fit_to_media(art, args.border, args.full_media)
+    if scaled:
+        where = "full media" if args.full_media else "usable area"
+        print(f"      input {art.width}x{art.height} != {MEDIA_W}x{MEDIA_H} -> scaled to fit "
+              f"{where} (aspect preserved, centered, >={args.border}+1 mm margin)")
+    jpeg, base_rgb = build_print_jpeg(norm)
     print(f"      {len(jpeg)} B  baseline JPEG  {MEDIA_W}x{MEDIA_H}  4:4:4  q{JPEG_QUALITY}")
 
+    # the cut generator reads a PNG and treats it AS the full 1200x2100 @300dpi media.
+    # Pass the exact original when it's already media-sized (byte-for-byte the validated
+    # path); otherwise hand it the normalized canvas via a temp PNG so print & cut match.
+    if scaled:
+        tmp = tempfile.NamedTemporaryFile(prefix="pixcut_norm_", suffix=".png", delete=False)
+        tmp.close(); norm.save(tmp.name); cut_png = tmp.name
+    else:
+        cut_png = args.png
+
     print(f"[2/2] cut vector    {args.png} -> {hpgl_path}  (border {args.border} mm, "
-          f"bias x={args.bias_x} y={args.bias_y} mm)")
-    hpgl = build_cut_hpgl(args.png, args.border, args.bias_x, args.bias_y, hpgl_path)
+          f"{args.join} joins, bias x={args.bias_x} y={args.bias_y} mm)")
+    try:
+        hpgl = build_cut_hpgl(cut_png, args.border, args.bias_x, args.bias_y, args.join, hpgl_path)
+    finally:
+        if scaled: os.unlink(cut_png)
 
     if args.send:
         print(f"\n=== SENDING: print {len(jpeg)}B + cut {len(hpgl.encode())}B ===")

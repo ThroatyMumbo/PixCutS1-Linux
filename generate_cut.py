@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
 """Generate a PixCut cut vector from a transparent PNG, the same way the vendor
-software appears to: cut = alpha silhouette OFFSET OUTWARD by the cut-border with
-round joins (Minkowski sum with a disk) -> flattened to polylines.
+software appears to: cut = alpha silhouette OFFSET OUTWARD by the cut-border
+(Minkowski sum with a disk) -> flattened to polylines. The corner style of that
+offset is configurable (round like the vendor, or miter/bevel).
 
 General purpose: works on any transparent PNG (each opaque blob -> one contour).
-Usage: generate_cut.py <in.png> [out.hpgl] [border_mm]
+Usage: generate_cut.py <in.png> [out.hpgl] [border_mm] [bias_x] [bias_y] [join]
+       join = round (default, vendor) | miter | bevel
 """
 import sys, math, numpy as np, cv2
 from shapely.geometry import Polygon, MultiPolygon, Point
+
+# corner style for the outward offset. "round" (disk Minkowski) is what the vendor
+# software uses; "miter" keeps sharp corners as extended points; "bevel" clips them
+# to a flat chamfer. shapely spells it "mitre"; accept the US "miter" too.
+_JOIN_MAP = {"round": "round", "miter": "mitre", "mitre": "mitre", "bevel": "bevel"}
 
 IN   = sys.argv[1]
 OUT  = sys.argv[2] if len(sys.argv) > 2 else "generated_cut.hpgl"
@@ -17,6 +24,13 @@ BIAS_Y_MM = float(sys.argv[5]) if len(sys.argv) > 5 else 0.0   # registration fu
                                                               # paper feeds between passes -> a feed(Y)-only
                                                               # slip is inherent). Default 0; measure per
                                                               # machine and pass in. +Y shifts the cut UP.
+JOIN = (sys.argv[6].lower() if len(sys.argv) > 6 else "round") # corner style: round|miter|bevel
+if JOIN not in _JOIN_MAP:
+    sys.exit(f"unknown join style {JOIN!r}; use one of round|miter|bevel")
+JOIN = _JOIN_MAP[JOIN]
+MITRE_LIMIT = 5.0    # cap on how far a miter spike may extend (x border) before it's beveled;
+                     # shapely default. Ignored for round/bevel. Keeps acute corners from
+                     # growing long spurs that could poke into an adjacent shape.
 PRESIMP_MM = 0.12    # kill raster staircase on the input silhouette
 FLAT_MM    = 0.05    # polyline flattening tolerance (~vendor's ~0.04mm)
 SPUR_MM    = 1.3     # length of each arm of the overcut tab at the start vertex
@@ -74,7 +88,7 @@ def main():
         p = Polygon(pts_mm)
         if not p.is_valid: p = p.buffer(0)
         p = p.simplify(PRESIMP_MM)                        # de-staircase silhouette
-        off = p.buffer(BORDER_MM, join_style="round", quad_segs=16)  # <-- the core op
+        off = p.buffer(BORDER_MM, join_style=JOIN, quad_segs=16, mitre_limit=MITRE_LIMIT)  # <-- the core op
         off = off.simplify(FLAT_MM)                       # flatten to polylines
         parts = off.geoms if isinstance(off, MultiPolygon) else [off]
         polys.extend(parts)
@@ -132,7 +146,7 @@ def main():
     out.append("U%d,%d  @ " % PARK)
     prog = " ".join(out)
     open(OUT, "w").write(prog)
-    print(f"contours: {len(polys)}   bytes: {len(prog)}   -> {OUT}")
+    print(f"contours: {len(polys)}   join: {JOIN}   bytes: {len(prog)}   -> {OUT}")
 
 if __name__ == "__main__":
     main()
