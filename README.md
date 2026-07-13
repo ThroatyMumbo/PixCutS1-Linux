@@ -1,13 +1,14 @@
 # PixCut S1 — open-source Linux driver & notes
 
-Reverse-engineered tooling for the **Liene PixCut S1** print-and-cut machine
-(USB `302c:3101`), which ships with no Linux support and enumerates as a generic
-USB printer. The protocol was recovered by capturing USB traffic with a
-[Cynthion](https://greatscottgadgets.com/cynthion/) analyzer + Packetry and
-decoding it with `tshark`.
+Reverse-engineered tooling for the **Liene PixCut S1** sticker printer,
+which does not currently support Linux. The protocol was recovered by
+capturing USB traffic with a [Cynthion](https://greatscottgadgets.com/cynthion/)
+analyzer + Packetry and decoding it with `tshark`.
 
-> ⚠️ **Unofficial.** Not affiliated with or endorsed by Liene. Sending a job
-> moves the machine and consumes a sheet. Use at your own risk.
+Currently USB only - does **not** support the Bluetooth communication layer.
+And honestly, does anybody actually like Bluetooth?
+
+> ⚠️ **Unofficial.** Not affiliated with or endorsed by Liene. Use at your own risk.
 
 ## Requirements
 
@@ -23,6 +24,8 @@ The driver only uses vendor interface 2 (endpoints `0x06`/`0x86`), which no
 kernel driver claims, so it does not conflict with `usblp` on the print interface.
 
 ## Usage
+
+Connect the printer over USB, power it on, wait for it to stop making noise, then give it a go:
 
 ```
 ./pixcut artwork.png            # dry run: writes _print.jpg, _cut.hpgl, _preview.png
