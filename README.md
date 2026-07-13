@@ -36,6 +36,11 @@ kernel driver claims, so it does not conflict with `usblp` on the print interfac
 Recommended input is a transparent PNG at print resolution (1200×2100 = 4×7" @ 300 dpi).
 Transparent pixels are converted to white or the set background image and used to calculate the cut outline.
 
+If you wanna be fancy you can also pass a modified `template.xcf` and it'll automatically extract the "Sticker" and "Background" layers:
+```
+./pixcut stickers.xcf --send
+```
+
 ### Arguments
 
 | Argument | Type | Default | Description |

@@ -31,7 +31,7 @@ DRY RUN (default) touches no hardware and writes three files:
 --send builds the combo-job and streams it over USB (interface 2, EP 0x06/0x86),
 reusing the proven replay path. THIS MOVES THE MACHINE AND CONSUMES A SHEET.
 """
-import sys, os, re, json, time, struct, argparse, subprocess, tempfile
+import sys, os, re, json, time, struct, argparse, subprocess, tempfile, shutil
 import numpy as np
 from PIL import Image, ImageDraw
 
@@ -57,6 +57,78 @@ CUT_AINV = np.linalg.inv(CUT_A)
 BIAS_X_MM, BIAS_Y_MM = 0.0, 0.0
 
 VID, PID, IFACE, EP_OUT, EP_IN = 0x302C, 0x3101, 2, 0x06, 0x86
+
+# XCF (GIMP) input: template.xcf layout is one "Sticker" layer (artwork -> print + cut)
+# over a "Background" layer (print-only, blank/white by default). We render each named
+# layer to a PNG via GIMP batch (Script-Fu) and feed them into the normal PNG pipeline.
+STICKER_NEEDLE, BG_NEEDLE = "sticker", "background"
+# Loads the XCF, prints each layer name (LAYER: <name>) for diagnostics, and writes the
+# FIRST visible layer whose (case-insensitive) name contains each needle, flattened onto
+# the full canvas (offsets + alpha preserved). Missing/hidden -> no file written.
+XCF_EXTRACT_SCM = r'''
+(let* ((image (car (gimp-file-load RUN-NONINTERACTIVE "{xcf}" "{xcf}")))
+       (layers (gimp-image-get-layers image))
+       (n (car layers)) (ids (cadr layers)))
+  (define (lower s)
+    (list->string (map (lambda (c)
+      (if (and (char>=? c #\A) (char<=? c #\Z))
+          (integer->char (+ 32 (char->integer c))) c)) (string->list s))))
+  (define (contains? hay needle)
+    (let* ((h (lower hay)) (m (lower needle))
+           (hl (string-length h)) (ml (string-length m)))
+      (let loop ((i 0))
+        (cond ((> (+ i ml) hl) #f)
+              ((string=? (substring h i (+ i ml)) m) #t)
+              (else (loop (+ i 1)))))))
+  (define (export-match needle path)
+    (let loop ((i 0))
+      (if (< i n)
+        (let ((lyr (vector-ref ids i)))
+          (if (and (= 1 (car (gimp-item-get-visible lyr)))
+                   (contains? (car (gimp-item-get-name lyr)) needle))
+            (let ((dup (car (gimp-layer-copy lyr FALSE))))
+              (gimp-image-insert-layer image dup 0 -1)
+              (gimp-layer-resize-to-image-size dup)
+              (file-png-save RUN-NONINTERACTIVE image dup path path 0 9 1 1 1 1 1)
+              (gimp-image-remove-layer image dup))
+            (loop (+ i 1)))))))
+  (let loop ((i 0))
+    (if (< i n)
+      (begin (gimp-message (string-append "LAYER: " (car (gimp-item-get-name (vector-ref ids i)))))
+             (loop (+ i 1)))))
+  (export-match "{sticker_needle}" "{sticker_out}")
+  (export-match "{bg_needle}" "{bg_out}")
+  (gimp-image-delete image))
+(gimp-quit 0)
+'''
+
+
+def extract_xcf_layers(xcf_path):
+    """GIMP XCF -> (sticker_png, background_png_or_None, tmpdir).
+
+    Renders the Sticker layer (required; the artwork that drives both print and cut) and
+    the Background layer (optional, print-only) to PNGs matching the template layout.
+    Caller owns tmpdir (shutil.rmtree when done). Exits with a clear message if GIMP is
+    missing or no visible Sticker layer is present."""
+    gimp = shutil.which("gimp-console") or shutil.which("gimp")
+    if not gimp:
+        sys.exit("XCF input needs GIMP on PATH (install 'gimp', which provides gimp-console),\n"
+                 "or export the Sticker/Background layers to PNG yourself and pass the PNG.")
+    tmpdir = tempfile.mkdtemp(prefix="pixcut_xcf_")
+    sticker_out = os.path.join(tmpdir, "sticker.png")
+    bg_out = os.path.join(tmpdir, "background.png")
+    esc = lambda s: s.replace("\\", "\\\\").replace('"', '\\"')
+    scm = XCF_EXTRACT_SCM.format(xcf=esc(os.path.abspath(xcf_path)),
+                                 sticker_needle=STICKER_NEEDLE, sticker_out=esc(sticker_out),
+                                 bg_needle=BG_NEEDLE, bg_out=esc(bg_out))
+    r = subprocess.run([gimp, "-i", "-b", "-"], input=scm, capture_output=True, text=True)
+    if not os.path.exists(sticker_out):
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        names = [ln.split("LAYER: ", 1)[1] for ln in r.stderr.splitlines() if "LAYER: " in ln]
+        sys.exit(f"XCF has no visible layer whose name contains '{STICKER_NEEDLE}'. "
+                 f"Layers seen: {names or '(GIMP produced none — is the file a valid XCF?)'}\n"
+                 f"GIMP stderr tail:\n{r.stderr[-800:]}")
+    return sticker_out, (bg_out if os.path.exists(bg_out) else None), tmpdir
 
 
 def fit_to_media(im_rgba, border_mm, full_media=False):
@@ -226,11 +298,14 @@ def send_job(jpeg, hpgl_bytes):
 
 def main():
     ap = argparse.ArgumentParser(description="PixCut E2E job builder (dry-run by default).")
-    ap.add_argument("png", help="artwork, transparent bg (1200x2100 @300dpi used as-is; "
-                                 "any other size is scaled to fit)")
+    ap.add_argument("png", help="artwork PNG (transparent bg; 1200x2100 @300dpi used as-is, "
+                                 "any other size scaled to fit) -- OR a GIMP .xcf laid out like "
+                                 "template.xcf (a 'Sticker' layer -> print+cut, optional "
+                                 "'Background' layer -> print-only)")
     ap.add_argument("out_prefix", nargs="?", help="output prefix (default: PNG name)")
     ap.add_argument("--background", help="optional PNG composited UNDER the artwork (full-bleed, "
-                                         "scaled to cover the sheet); prints but is ignored by the cut")
+                                         "scaled to cover the sheet); prints but is ignored by the cut. "
+                                         "Overrides the XCF 'Background' layer when the input is .xcf")
     ap.add_argument("--border", type=float, default=1.25, help="cut border mm (default 1.25)")
     ap.add_argument("--join", choices=["round", "miter", "bevel"], default="round",
                     help="offset corner style: round (vendor default) | miter | bevel")
@@ -250,18 +325,32 @@ def main():
     hpgl_path = f"{prefix}_cut.hpgl"
     prev_path = f"{prefix}_preview.png"
 
+    # XCF input: split the template's Sticker/Background layers into PNGs the rest of the
+    # pipeline understands. Sticker -> artwork (print + cut); Background -> print-only bg,
+    # unless the user passed an explicit --background (that wins).
+    art_src, bg_src, xcf_tmpdir = args.png, args.background, None
+    if args.png.lower().endswith(".xcf"):
+        sticker_png, xcf_bg, xcf_tmpdir = extract_xcf_layers(args.png)
+        art_src = sticker_png
+        used_xcf_bg = bg_src is None and xcf_bg is not None
+        if used_xcf_bg:
+            bg_src = xcf_bg
+        print(f"      XCF {args.png}: 'Sticker' layer -> artwork" +
+              (", 'Background' layer -> print background" if used_xcf_bg else
+               (", 'Background' layer overridden by --background" if xcf_bg else "")))
+
     print(f"[1/2] print raster  {args.png} -> {jpg_path}")
-    art = Image.open(args.png).convert("RGBA")
+    art = Image.open(art_src).convert("RGBA")
     norm, scaled = fit_to_media(art, args.border, args.full_media)
     if scaled:
         where = "full media" if args.full_media else "usable area"
         print(f"      input {art.width}x{art.height} != {MEDIA_W}x{MEDIA_H} -> scaled to fit "
               f"{where} (aspect preserved, centered, >={args.border}+1 mm margin)")
     bg_norm = None
-    if args.background:
-        bg_art = Image.open(args.background).convert("RGBA")
+    if bg_src:
+        bg_art = Image.open(bg_src).convert("RGBA")
         bg_norm = fit_background(bg_art)
-        print(f"      background {args.background} {bg_art.width}x{bg_art.height} -> "
+        print(f"      background {bg_src} {bg_art.width}x{bg_art.height} -> "
               f"cover {MEDIA_W}x{MEDIA_H} under the artwork (ignored by the cut)")
     jpeg, base_rgb = build_print_jpeg(norm, bg_norm)
     print(f"      {len(jpeg)} B  baseline JPEG  {MEDIA_W}x{MEDIA_H}  4:4:4  q{JPEG_QUALITY}")
@@ -273,7 +362,7 @@ def main():
         tmp = tempfile.NamedTemporaryFile(prefix="pixcut_norm_", suffix=".png", delete=False)
         tmp.close(); norm.save(tmp.name); cut_png = tmp.name
     else:
-        cut_png = args.png
+        cut_png = art_src                                 # the (possibly XCF-derived) artwork PNG
 
     print(f"[2/2] cut vector    {args.png} -> {hpgl_path}  (border {args.border} mm, "
           f"{args.join} joins, bias x={args.bias_x} y={args.bias_y} mm)")
@@ -281,6 +370,8 @@ def main():
         hpgl = build_cut_hpgl(cut_png, args.border, args.bias_x, args.bias_y, args.join, hpgl_path)
     finally:
         if scaled: os.unlink(cut_png)
+        # XCF-derived layer PNGs are fully consumed now (print JPEG + cut both built)
+        if xcf_tmpdir: shutil.rmtree(xcf_tmpdir, ignore_errors=True)
 
     if args.send:
         print(f"\n=== SENDING: print {len(jpeg)}B + cut {len(hpgl.encode())}B ===")
