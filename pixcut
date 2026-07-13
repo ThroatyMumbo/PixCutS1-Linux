@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Top-level wrapper: bootstrap the Python venv (only when needed) and pass all
+# arguments straight through to make_job.py. Run from anywhere.
+#
+#   ./pixcut art.png --background bg.png --border 1.5
+#   ./pixcut art.png --send
+#
+# The venv is created on first run and its deps are (re)installed only when
+# requirements.txt changes, so repeat runs are near-instant. Override the python
+# used to build the venv with PIXCUT_PYTHON=python3.12 ./pixcut ...
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV="$HERE/.venv"
+REQ="$HERE/requirements.txt"
+STAMP="$VENV/.requirements.sha256"   # hash of the requirements last installed
+PY="${PIXCUT_PYTHON:-python3}"
+
+# 1. create the venv if it doesn't exist yet
+if [ ! -x "$VENV/bin/python" ]; then
+    echo "pixcut: creating venv at $VENV ..." >&2
+    "$PY" -m venv "$VENV"
+fi
+
+# 2. (re)install deps only when requirements.txt changed since the last install
+want="$(sha256sum "$REQ" | cut -d' ' -f1)"
+have="$(cat "$STAMP" 2>/dev/null || true)"
+if [ "$want" != "$have" ]; then
+    echo "pixcut: installing dependencies ..." >&2
+    "$VENV/bin/python" -m pip install --quiet --upgrade pip
+    "$VENV/bin/python" -m pip install --quiet -r "$REQ"
+    echo "$want" > "$STAMP"
+fi
+
+# 3. passthru to make_job.py
+exec "$VENV/bin/python" "$HERE/make_job.py" "$@"

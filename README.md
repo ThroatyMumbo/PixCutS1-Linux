@@ -15,11 +15,7 @@ combined print+cut job over USB.
 
 ## Requirements
 
-- Python 3 and the packages in `requirements.txt`:
-  ```
-  pip install -r requirements.txt
-  ```
-- `tshark` (Wireshark CLI) — only for the capture-decoding scripts.
+- Python 3 and the packages in `requirements.txt` (or just run `./pixcut` which installs everything in a venv automatically)
 - USB access to the device. Add a udev rule so you don't need root:
   ```
   # /etc/udev/rules.d/70-pixcut.rules
@@ -32,36 +28,24 @@ kernel driver claims, so it does not conflict with `usblp` on the print interfac
 
 ## Usage
 
-Read-only probe (safe — just queries device state):
 ```
-python3 test_scripts/pixcut_probe.py
-```
-
-Build a print+cut job from artwork. Input must be a transparent PNG at print
-resolution (1200×2100 = 4×7" @ 300 dpi); transparent pixels are "no ink" for the
-printer and "outside the sticker" for the cutter:
-```
-python3 make_job.py artwork.png            # dry run: writes _print.jpg, _cut.hpgl, _preview.png
-python3 make_job.py artwork.png --send     # streams to hardware (moves the machine)
-```
-`--border` sets the cut offset in mm; `--bias-x/--bias-y` apply an optional
-per-machine mechanical registration fudge (default 0). Inspect `_preview.png`
-before sending — it overlays the exact cut path (tabs and all) on the print.
-
-Generate just a cut vector:
-```
-python3 generate_cut.py artwork.png out.hpgl [border_mm]
+./pixcut artwork.png            # dry run: writes _print.jpg, _cut.hpgl, _preview.png
+./pixcut artwork.png --send     # pull the trigger
 ```
 
-## Layout
+Recommended input is a transparent PNG at print resolution (1200×2100 = 4×7" @ 300 dpi).
+Transparent pixels are converted to white or the set background image and used to calculate the cut outline.
 
-- `make_job.py` — end-to-end job builder (PNG → print JPEG + cut HPGL → USB stream).
-- `generate_cut.py` — alpha silhouette → offset cut contour with overcut tabs.
-- `test_scripts/` — RE and calibration helpers (`pixcut_probe.py`,
-  `extract_job.py`, `prep_replay.py`, `replay_job.py`, `calibration_sheet.py`,
-  `cut_calibration.py`).
-- `test_samples/` — sample inputs/outputs.
+### Arguments
 
-## License
+| Argument | Type | Default | Description |
+|----------|------|---------|-------------|
+| `--background` | path | White fill | PNG composited full-bleed *under* the artwork in the print only; prints but is ignored by the cut. |
+| `--border` | mm | `1.25` | Cut border: how far the cut outline is offset outward from the artwork edge. |
+| `--join` | `round`\|`miter`\|`bevel` | `round` | Corner style where the offset outline turns. `round` matches the vendor. |
+| `--full-media` | flag | off | When scaling, fit the whole sheet instead of the usable area (5.1 mm bleed top/left/right). Ignored for exact-size input. |
+| `--bias-x` | mm | `0.0` | Mechanical cross-axis (X) print→cut registration nudge. |
+| `--bias-y` | mm | `0.0` | Mechanical feed-axis (Y) registration nudge; +Y shifts the cut up. |
+| `--send` | flag | off | Stream the job to the hardware over USB. **Moves the machine and consumes a sheet.** Without it, `pixcut` only does a dry run. |
 
-[MIT](LICENSE).
+The `pixcut` wrapper builds/reuses a `.venv` and passes every argument straight through to `make_job.py`. Set `PIXCUT_PYTHON` to choose the base Python used to create the venv.
