@@ -1,0 +1,5 @@
+# Test-only deps (not needed to run the driver). Install alongside requirements.txt:
+#   .venv/bin/pip install -r requirements.txt -r requirements-dev.txt
+# then run:  .venv/bin/python -m pytest
+-r requirements.txt
+pytest>=8.0

@@ -16,18 +16,7 @@ from shapely.geometry import Polygon, MultiPolygon, Point
 # to a flat chamfer. shapely spells it "mitre"; accept the US "miter" too.
 _JOIN_MAP = {"round": "round", "miter": "mitre", "mitre": "mitre", "bevel": "bevel"}
 
-IN   = sys.argv[1]
-OUT  = sys.argv[2] if len(sys.argv) > 2 else "generated_cut.hpgl"
-BORDER_MM = float(sys.argv[3]) if len(sys.argv) > 3 else 1.25  # cut offset (backed out of vendor data)
-BIAS_X_MM = float(sys.argv[4]) if len(sys.argv) > 4 else 0.0   # OPTIONAL mechanical print->cut
-BIAS_Y_MM = float(sys.argv[5]) if len(sys.argv) > 5 else 0.0   # registration fudge (NOT in the data;
-                                                              # paper feeds between passes -> a feed(Y)-only
-                                                              # slip is inherent). Default 0; measure per
-                                                              # machine and pass in. +Y shifts the cut UP.
-JOIN = (sys.argv[6].lower() if len(sys.argv) > 6 else "round") # corner style: round|miter|bevel
-if JOIN not in _JOIN_MAP:
-    sys.exit(f"unknown join style {JOIN!r}; use one of round|miter|bevel")
-JOIN = _JOIN_MAP[JOIN]
+DEFAULT_BORDER_MM = 1.25  # cut offset (backed out of vendor data)
 MITRE_LIMIT = 5.0    # cap on how far a miter spike may extend (x border) before it's beveled;
                      # shapely default. Ignored for round/bevel. Keeps acute corners from
                      # growing long spurs that could poke into an adjacent shape.
@@ -45,8 +34,8 @@ PARK = (6476, 0)     # device park position
 # paper left edge, cutX=0 at the paper bottom edge), so NO separate bleed term. This
 # targets a cut that is 1:1 concentric with our full-media 300dpi print (the older
 # 39.32 affine carried the vendor's fit-scale and made the cut ~2.5% too small).
-def to_cut(x_mm, y_mm):
-    x_mm -= BIAS_X_MM; y_mm -= BIAS_Y_MM             # aim high/left so the mechanical slip lands it right
+def to_cut(x_mm, y_mm, bias_x=0.0, bias_y=0.0):
+    x_mm -= bias_x; y_mm -= bias_y                   # aim high/left so the mechanical slip lands it right
     cx =  0.0055*x_mm - 40.5374*y_mm + 7153.776
     cy = 40.5079*x_mm -  0.0142*y_mm -   22.218
     return round(cx), round(cy)
@@ -72,7 +61,21 @@ def outward_bisector(poly, ring, i):
     return bis, abs(_sangle(bis, ea))        # half-angle of the exterior (waste) wedge
 
 
-def main():
+def main(argv=None):
+    argv = sys.argv if argv is None else argv
+    IN   = argv[1]
+    OUT  = argv[2] if len(argv) > 2 else "generated_cut.hpgl"
+    BORDER_MM = float(argv[3]) if len(argv) > 3 else DEFAULT_BORDER_MM
+    BIAS_X_MM = float(argv[4]) if len(argv) > 4 else 0.0   # OPTIONAL mechanical print->cut
+    BIAS_Y_MM = float(argv[5]) if len(argv) > 5 else 0.0   # registration fudge (NOT in the data;
+                                                           # paper feeds between passes -> a feed(Y)-only
+                                                           # slip is inherent). Default 0; measure per
+                                                           # machine and pass in. +Y shifts the cut UP.
+    JOIN = (argv[6].lower() if len(argv) > 6 else "round") # corner style: round|miter|bevel
+    if JOIN not in _JOIN_MAP:
+        sys.exit(f"unknown join style {JOIN!r}; use one of round|miter|bevel")
+    JOIN = _JOIN_MAP[JOIN]
+
     im = cv2.imread(IN, cv2.IMREAD_UNCHANGED)
     if im.shape[2] == 4: alpha = im[:, :, 3]
     else: alpha = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)  # fallback: non-white = shape
@@ -141,7 +144,7 @@ def main():
     out = ["IN VER0.1.0 KP42 "]
     for j, poly in enumerate(polys):
         others = [polys[k] for k in range(len(polys)) if k != j]
-        cut = [to_cut(x, y) for x, y in xtab(poly, best_start(poly, others))]
+        cut = [to_cut(x, y, BIAS_X_MM, BIAS_Y_MM) for x, y in xtab(poly, best_start(poly, others))]
         out.append("U%d,%d " % cut[0] + " ".join("D%d,%d" % p for p in cut))
     out.append("U%d,%d  @ " % PARK)
     prog = " ".join(out)
