@@ -1,0 +1,7 @@
+# Local dev crap
+CLAUDE.md
+captures/
+.venv/
+.directory
+__pycache__/
+*.pyc

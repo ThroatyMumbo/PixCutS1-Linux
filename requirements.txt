@@ -1,0 +1,7 @@
+# Python deps for the PixCut S1 scripts.
+# System deps (not pip): tshark/Wireshark for the capture-decoding scripts.
+numpy>=2.0
+pillow>=10.0
+pyusb>=1.2          # USB job streaming (make_job --send, replay_job, pixcut_probe)
+opencv-python-headless>=4.9   # generate_cut: alpha silhouette -> contours
+shapely>=2.0        # generate_cut: outward offset (Minkowski) + polyline flatten
