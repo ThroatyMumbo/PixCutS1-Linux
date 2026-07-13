@@ -12,8 +12,11 @@ sheet. Transparent background (zero alpha) marks "no ink" for the printer and
 
   print raster = PNG composited onto WHITE, saved baseline JPEG, 4:4:4, q90
                  (matches the vendor's encoder: SOF0, samp 1x1, ~q90, no DRI).
+                 An optional --background PNG is composited UNDER the artwork
+                 (full-bleed) so it prints but is invisible to the cutter.
   cut vector   = generate_cut.py's validated U/D path (alpha silhouette offset
                  outward by the cut border, round/miter/bevel joins, overcut tabs).
+                 Derived from the ARTWORK ONLY -- the background never affects the cut.
 
 DRY RUN (default) touches no hardware and writes three files:
   <out>_print.jpg      the EXACT bytes we'd stream to the printer
@@ -83,16 +86,35 @@ def fit_to_media(im_rgba, border_mm, full_media=False):
     return canvas, True
 
 
-def build_print_jpeg(im_rgba):
-    """Normalized 1200x2100 RGBA -> exact print-raster JPEG bytes (composited on
-    white, vendor format)."""
-    bg = Image.new("RGB", im_rgba.size, (255, 255, 255))     # transparent -> white (no ink)
-    bg.paste(im_rgba, mask=im_rgba.split()[3])
+def fit_background(im_rgba):
+    """Scale a background image to COVER the full 1200x2100 media (fill, center-crop),
+    preserving aspect. Backgrounds are decorative full-bleed under-layers: unlike the
+    artwork they carry no cut, so they always fill the whole sheet rather than being
+    inset into the usable area. Exact-size input passes through unchanged."""
+    if im_rgba.size == (MEDIA_W, MEDIA_H):
+        return im_rgba
+    scale = max(MEDIA_W / im_rgba.width, MEDIA_H / im_rgba.height)   # cover, not fit
+    new_w, new_h = max(1, round(im_rgba.width*scale)), max(1, round(im_rgba.height*scale))
+    scaled = im_rgba.resize((new_w, new_h), Image.LANCZOS)
+    canvas = Image.new("RGBA", (MEDIA_W, MEDIA_H), (0, 0, 0, 0))
+    canvas.paste(scaled, ((MEDIA_W - new_w)//2, (MEDIA_H - new_h)//2))  # center-crop overflow
+    return canvas
+
+
+def build_print_jpeg(im_rgba, bg_rgba=None):
+    """Normalized 1200x2100 RGBA -> exact print-raster JPEG bytes (vendor format).
+    Composites [white] <- [optional background] <- [artwork]; transparent pixels of
+    the top layer let the layer beneath show through, and bare media stays white."""
+    base = Image.new("RGBA", im_rgba.size, (255, 255, 255, 255))  # bare media = white (no ink)
+    if bg_rgba is not None:
+        base = Image.alpha_composite(base, bg_rgba)               # background under the art
+    base = Image.alpha_composite(base, im_rgba)                   # artwork on top
+    rgb = base.convert("RGB")
     import io
     buf = io.BytesIO()
     # baseline (no progression), 4:4:4 (subsampling=0), no restart markers -> matches vendor
-    bg.save(buf, format="JPEG", quality=JPEG_QUALITY, subsampling=0, optimize=False)
-    return buf.getvalue(), bg
+    rgb.save(buf, format="JPEG", quality=JPEG_QUALITY, subsampling=0, optimize=False)
+    return buf.getvalue(), rgb
 
 
 def build_cut_hpgl(png_path, border_mm, bias_x, bias_y, join, out_hpgl):
@@ -207,6 +229,8 @@ def main():
     ap.add_argument("png", help="artwork, transparent bg (1200x2100 @300dpi used as-is; "
                                  "any other size is scaled to fit)")
     ap.add_argument("out_prefix", nargs="?", help="output prefix (default: PNG name)")
+    ap.add_argument("--background", help="optional PNG composited UNDER the artwork (full-bleed, "
+                                         "scaled to cover the sheet); prints but is ignored by the cut")
     ap.add_argument("--border", type=float, default=1.25, help="cut border mm (default 1.25)")
     ap.add_argument("--join", choices=["round", "miter", "bevel"], default="round",
                     help="offset corner style: round (vendor default) | miter | bevel")
@@ -233,7 +257,13 @@ def main():
         where = "full media" if args.full_media else "usable area"
         print(f"      input {art.width}x{art.height} != {MEDIA_W}x{MEDIA_H} -> scaled to fit "
               f"{where} (aspect preserved, centered, >={args.border}+1 mm margin)")
-    jpeg, base_rgb = build_print_jpeg(norm)
+    bg_norm = None
+    if args.background:
+        bg_art = Image.open(args.background).convert("RGBA")
+        bg_norm = fit_background(bg_art)
+        print(f"      background {args.background} {bg_art.width}x{bg_art.height} -> "
+              f"cover {MEDIA_W}x{MEDIA_H} under the artwork (ignored by the cut)")
+    jpeg, base_rgb = build_print_jpeg(norm, bg_norm)
     print(f"      {len(jpeg)} B  baseline JPEG  {MEDIA_W}x{MEDIA_H}  4:4:4  q{JPEG_QUALITY}")
 
     # the cut generator reads a PNG and treats it AS the full 1200x2100 @300dpi media.
