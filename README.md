@@ -6,10 +6,6 @@ USB printer. The protocol was recovered by capturing USB traffic with a
 [Cynthion](https://greatscottgadgets.com/cynthion/) analyzer + Packetry and
 decoding it with `tshark`.
 
-These scripts can drive the machine directly from Linux: composite artwork into
-the vendor's print raster, generate a matching cut contour, and stream a
-combined print+cut job over USB.
-
 > ⚠️ **Unofficial.** Not affiliated with or endorsed by Liene. Sending a job
 > moves the machine and consumes a sheet. Use at your own risk.
 
@@ -38,7 +34,8 @@ Transparent pixels are converted to white or the set background image and used t
 
 If you wanna be fancy you can also pass a modified `template.xcf` and it'll automatically extract the "Sticker" and "Background" layers:
 ```
-./pixcut stickers.xcf --send
+./pixcut stickers.xcf            # check that the previews look gud
+./pixcut stickers.xcf --send     # boom!
 ```
 
 ### Arguments
@@ -54,3 +51,16 @@ If you wanna be fancy you can also pass a modified `template.xcf` and it'll auto
 | `--send` | flag | off | Stream the job to the hardware over USB. **Moves the machine and consumes a sheet.** Without it, `pixcut` only does a dry run. |
 
 The `pixcut` wrapper builds/reuses a `.venv` and passes every argument straight through to `make_job.py`. Set `PIXCUT_PYTHON` to choose the base Python used to create the venv.
+
+## Motivation
+
+The official PixCut vendor software only supports Android, iOS, macOS, and Windows 🤮.
+It also requires a completely unnecessary and clunky account creation process, because
+we're living in the future! Every gadget and gizmo you buy requires an app that you must
+**register** and **login** with to use. When I was trying to use the Windows software
+for this thing to print a nice sticker label for my customized [DOOM on Loopy cartridge shell](https://github.com/ThroatyMumbo/LoopyDOOM),
+I was about ready to smash it with a sledgehammer after it prompted me to check my email
+for a verification code the **fifth time in a row**. All just to print a single sticker.
+
+I hope these scripts help you avoid this same frustration, assuming you're in the
+0.00000001% of people who own one of these and prefer Linux.
